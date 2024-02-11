@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, random_split
-from torch.nn import functional as F
+from torch.nn import functional as F_torch
+from torchvision.transforms import functional as F_torchvision
 import os   # for os.path.join
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,13 +20,16 @@ from torchsummary import summary
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.callbacks import Callback
+import automap_model as automap
+
 
 
 # Set the default data type for PyTorch tensors
 torch.set_float32_matmul_precision('medium')
 
 checkpoint_callback = ModelCheckpoint(
-    monitor='val_loss',  # Name of the metric to monitor
+    monitor='train_loss',  # Name of the metric to monitor
     dirpath='checkpoints/',  # Directory where checkpoints will be saved
     filename='best-checkpoint',  # Checkpoint file name
     save_top_k=1,  # Number of best models to save; set to -1 to save all
@@ -33,6 +37,11 @@ checkpoint_callback = ModelCheckpoint(
     save_last=True,  # Optionally save the last model in addition to the best one
     verbose=True,  # Print a message when a new best model is saved
 )
+
+
+class NewLineEpochCallback(Callback):
+    def on_epoch_start(self, trainer, pl_module):
+        print("\n")  # Print a new line at the beginning of each epoch
 
 
 
@@ -44,51 +53,6 @@ n_H0, n_W0 = 110, 110  # Example dimensions, modify as per your dataset
 seed = 42
 seed_everything(seed)
 
-
-
-class AUTOMAPModel(pl.LightningModule):
-    def __init__(self, n_H0, n_W0):
-        super(AUTOMAPModel, self).__init__()
-        self.n_H0 = n_H0
-        self.n_W0 = n_W0
-        # Define the model architecture
-        self.fc1 = nn.Linear(n_H0 * n_W0 * 2, n_H0 * n_W0)
-        self.fc2 = nn.Linear(n_H0 * n_W0, n_H0 * n_W0)
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=5, padding='same')
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=5, padding='same')
-        self.conv3 = nn.Conv2d(64, 1, kernel_size=7, padding='same')
-
-        # Activation and Regularization
-        self.tanh = nn.Tanh()
-        self.relu = nn.ReLU()
-
-
-
-    def forward(self, x):
-        # Reshape x to match the input dimensions
-        x = x.view(-1, self.n_H0 * self.n_W0 * 2)
-
-        # Forward pass
-        x = self.tanh(self.fc1(x))
-        x = self.tanh(self.fc2(x))
-        # Reshape for convolutional layers
-        x = x.view(-1, 1, self.n_H0, self.n_W0)
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.conv3(x)
-        return x.squeeze(1)  # Remove channel dimension for the output
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self(x)
-        loss = torch.mean((y_hat - y) ** 2)
-        self.log('train_loss', loss, on_step=True,
-                 on_epoch=True, prog_bar=True, logger=True)
-        return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.RMSprop(self.parameters(), lr=0.001)
-        return optimizer
 
 
 def load_data(X_train, Y_train, batch_size=64):
@@ -103,12 +67,6 @@ def load_data(X_train, Y_train, batch_size=64):
     return my_dataloader
 
 
-
-
-import os
-import torch
-from torchvision.transforms import functional as F
-from PIL import Image
 
 # Define the directory where the images are located
 automap_train_dir = '/home/avi/data/imagenet_20/automap_train'
@@ -127,11 +85,11 @@ for i, file in enumerate(files):
     # Open the image file
     with Image.open(os.path.join(automap_train_dir, file)) as img:
         # Convert the image to a PyTorch tensor
-        img_tensor = F.to_tensor(img)
+        img_tensor = F_torchvision.to_tensor(img)
 
         # Rotate the image and store the augmented images
         for j in range(num_rotations):
-            rotated_img_tensor = F.rotate(img_tensor, 90 * (j + 1))
+            rotated_img_tensor = F_torchvision.rotate(img_tensor, 90 * (j + 1))
             augmented_images[i * num_rotations + j] = rotated_img_tensor
 
 # Print the shape of the augmented images tensor
@@ -157,25 +115,28 @@ for i, file in enumerate(files):
     # Open the image file
     with Image.open(os.path.join(automap_train_dir, file)) as img:
         # Convert the image to a PyTorch tensor
-        img_tensor = F.to_tensor(img)
+        img_tensor = F_torchvision.to_tensor(img)
 
         # Rotate the image and store the augmented images
         for j in range(num_rotations):
-            rotated_img_tensor = F.rotate(img_tensor, 90 * (j + 1))
+            rotated_img_tensor = F_torchvision.rotate(img_tensor, 90 * (j + 1))
             augmented_images[i * num_rotations + j] = rotated_img_tensor
 
-# Print the shape of the augmented images tensor
-print(augmented_images.shape)
+
+
+# normalize the images, each image is normalized by substracting the mean of each image and dividing by the maximal value of pixel of all images.
+mean = augmented_images.mean(dim=(1, 2))
+max_val = augmented_images.max()
+print(f'Max pixel value (norm_factor): {max_val}')
+mean_tensor = mean.view(-1, 1, 1)  # Reshape mean to (4000, 1, 1)
+mean_tensor = mean_tensor.expand(-1, n_H0, n_W0)  # Expand mean_tensor to (4000, 110, 110)
+augmented_images = (augmented_images - mean_tensor) / max_val
 
 
 fft_images = torch.fft.fft2(augmented_images)
-
 real_part = fft_images.real
 imaginary_part = fft_images.imag
 sensor_data = torch.stack([real_part, imaginary_part], dim=-1)
-
-# Print the shape of the stacked images tensor
-print(sensor_data.shape)
 
 
 def check_device(model):
@@ -184,22 +145,16 @@ def check_device(model):
 
 # Example usage
 
-model = AUTOMAPModel(n_H0, n_W0)
-
-# device = check_device(model)
-# print(device)
-
-# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-# summary(model.to(device), input_size=(2, n_H0, n_W0))
-
+model = automap.AUTOMAPModel(n_H0, n_W0, max_val)
 
 # Assuming X_train and Y_train are available as numpy arrays
 X_train = sensor_data
 Y_train = augmented_images
 train_dataloader = load_data(X_train, Y_train, batch_size=1)
 
-trainer = pl.Trainer(callbacks=[checkpoint_callback], 
-                     max_epochs=10)
+trainer = pl.Trainer(callbacks=[checkpoint_callback, NewLineEpochCallback()],
+                     max_epochs=2)
 
 trainer.fit(model, train_dataloader)
+
+

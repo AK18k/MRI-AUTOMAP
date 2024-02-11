@@ -1,2 +1,4 @@
 .DS_Status
 lightning_logs/
+checkpoints/
+__pycache__/automap_model.cpython-310.pyc
